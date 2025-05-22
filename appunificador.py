@@ -1,81 +1,77 @@
-import streamlit as st
 import pandas as pd
-import os
-import tempfile
+import streamlit as st
 from datetime import datetime
-from openpyxl import Workbook
-import xlrd
+import tempfile
+import os
 
-def convertir_a_xlsx_si_es_necesario(ruta_archivo):
-    if ruta_archivo.endswith('.xls'):
-        libro_xls = xlrd.open_workbook(ruta_archivo)
-        nuevo_archivo = ruta_archivo + 'x'
-        libro_xlsx = Workbook()
-        hoja_xlsx = libro_xlsx.active
+def convertir_a_xlsx_si_es_necesario(uploaded_file):
+    if uploaded_file.name.endswith('.xlsx'):
+        return uploaded_file
 
-        hoja_xls = libro_xls.sheet_by_index(0)
-        for fila_idx in range(hoja_xls.nrows):
-            fila = hoja_xls.row_values(fila_idx)
-            hoja_xlsx.append(fila)
+    df_dict = pd.read_excel(uploaded_file, sheet_name=None)
 
-        libro_xlsx.save(nuevo_archivo)
-        return nuevo_archivo
-    return ruta_archivo
+    temp_xlsx = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
+    with pd.ExcelWriter(temp_xlsx.name, engine="openpyxl") as writer:
+        for sheet, df in df_dict.items():
+            df.to_excel(writer, sheet_name=sheet, index=False)
 
-def consolidar_archivo(ruta_archivo):
-    ruta_archivo = convertir_a_xlsx_si_es_necesario(ruta_archivo)
+    return temp_xlsx.name
+
+def consolidar_excel(ruta_archivo):
     xls = pd.ExcelFile(ruta_archivo)
     nombres_hojas = xls.sheet_names
 
-    columnas_a_eliminar = ['D', 'E', 'H', 'R', 'T', 'U', 'V', 'X', 'Y']
-    df_total = pd.DataFrame()
+    df_base = pd.read_excel(xls, sheet_name=nombres_hojas[0], skiprows=14).dropna(how='all')
+    columnas_base = df_base.columns
 
-    for hoja in nombres_hojas:
-        df = pd.read_excel(xls, sheet_name=hoja, header=None, skiprows=14)
-        df = df.dropna(how='all')  # elimina filas completamente vacías
-        df_total = pd.concat([df_total, df], ignore_index=True)
+    columnas_a_eliminar = [3, 4, 7, 17, 19, 20, 21, 23, 24]
+    columnas_existentes = [col for i, col in enumerate(df_base.columns) if i in columnas_a_eliminar]
+    df_base.drop(columns=columnas_existentes, inplace=True)
+    df_base = df_base.iloc[1:].reset_index(drop=True)
 
-    # Eliminar columnas vacías específicas (por letras)
-    columnas_indices = [ord(c) - ord('A') for c in columnas_a_eliminar]
-    df_total.drop(df_total.columns[columnas_indices], axis=1, inplace=True, errors='ignore')
+    dataframes = [df_base]
 
-    # Eliminar las primeras dos filas del DataFrame consolidado
-    df_total = df_total.iloc[1:].reset_index(drop=True)
+    for hoja in nombres_hojas[1:]:
+        df = pd.read_excel(xls, sheet_name=hoja, skiprows=14).dropna(how='all')
+        df.columns = columnas_base
+        columnas_existentes = [col for i, col in enumerate(df.columns) if i in columnas_a_eliminar]
+        df.drop(columns=columnas_existentes, inplace=True)
+        df = df.iloc[1:].reset_index(drop=True)
+        dataframes.append(df)
 
-    return df_total
+    df_final = pd.concat(dataframes, ignore_index=True)
 
-def generar_nombre_archivo():
     fecha_actual = datetime.today().strftime("%d-%m-%Y")
-    return f"CARTERA POR ESTADO {fecha_actual}.xlsx"
+    nombre_archivo = f"CARTERA POR ESTADO {fecha_actual}.xlsx"
 
-def main():
-    st.set_page_config(page_title="Unificador de Carteras", layout="centered")
-    st.title("📊 Convertidor y Unificador de Reportes de Cartera")
+    output = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
+    df_final.to_excel(output.name, index=False)
 
-    st.write("Sube un archivo de Excel (`.xls` o `.xlsx`) para consolidar todas sus hojas desde la fila 15.")
+    return output.name, nombre_archivo
 
-    archivo_subido = st.file_uploader("📁 Selecciona el archivo", type=["xls", "xlsx"])
+# ================= STREAMLIT APP =================
 
-    if archivo_subido is not None:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".xls") as tmp:
-            tmp.write(archivo_subido.read())
-            tmp_path = tmp.name
+st.set_page_config(page_title="Unificador de Excel", layout="centered")
+st.title("📊 Unificador de Excel - CARTERA POR ESTADO")
 
-        st.info("⏳ Procesando el archivo...")
-        df_final = consolidar_archivo(tmp_path)
+st.write("Sube un archivo Excel (.xls o .xlsx) con múltiples hojas. Consolidaremos la información desde la fila 15.")
 
-        nombre_salida = generar_nombre_archivo()
-        salida_path = os.path.join(tempfile.gettempdir(), nombre_salida)
-        df_final.to_excel(salida_path, index=False)
+uploaded_file = st.file_uploader("Selecciona tu archivo Excel", type=["xls", "xlsx"])
 
-        with open(salida_path, "rb") as f:
-            st.success("✅ Consolidación completada.")
-            st.download_button(
-                label="📥 Descargar archivo consolidado",
-                data=f,
-                file_name=nombre_salida,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+if uploaded_file:
+    with st.spinner("Procesando archivo..."):
+        try:
+            archivo_convertido = convertir_a_xlsx_si_es_necesario(uploaded_file)
+            archivo_final, nombre_archivo = consolidar_excel(archivo_convertido)
 
-if __name__ == "__main__":
-    main()
+            with open(archivo_final, "rb") as f:
+                st.success("✅ Archivo procesado exitosamente.")
+                st.download_button(
+                    label="📥 Descargar archivo consolidado",
+                    data=f,
+                    file_name=nombre_archivo,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+
+        except Exception as e:
+            st.error(f"❌ Error al procesar el archivo: {str(e)}")
